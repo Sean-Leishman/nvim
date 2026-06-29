@@ -32,18 +32,12 @@ return {
 				},
 			})
 
-			vim.api.nvim_create_autocmd({ "BufRead", "BufNewFile" }, {
-				callback = function(ev)
-					local ft = vim.bo[ev.buf].filetype
-					if ft == "python" then
-						vim.cmd("LspStart pyright")
-					elseif ft == "c" or ft == "cpp" or ft == "cc" or ft == "h" or ft == "hpp" then
-						vim.cmd("LspStart clangd")
-					elseif ft == "rs" then
-						vim.cmd("LspStart rust_analyzer")
-					end
-				end,
-			})
+			-- Enable the servers; Neovim auto-starts each one for its filetypes
+			-- (filetypes come from nvim-lspconfig's bundled lsp/ configs). This
+			-- replaces the old `:LspStart` autocmd: that command was removed
+			-- upstream, so on nvim 0.11+ it errored with E492 on every file open
+			-- and no LSP ever attached.
+			vim.lsp.enable({ "clangd", "lua_ls", "pyright", "rust_analyzer" })
 		end,
 	},
 	{
@@ -196,8 +190,16 @@ return {
 				local project_root = get_project_root(bufnr)
 				local compile_commands_dir = find_compile_commands_recursive(project_root)
 
+				-- Prefer mason's clangd (kept up to date) over a possibly ancient
+				-- system clangd on PATH.
+				local clangd_bin = "clangd"
+				local mason_clangd = vim.fn.expand("$HOME/.local/share/nvim/mason/bin/clangd")
+				if vim.fn.executable(mason_clangd) == 1 then
+					clangd_bin = mason_clangd
+				end
+
 				local cmd = {
-					"clangd",
+					clangd_bin,
 					"--background-index",
 					"--clang-tidy",
 					"--header-insertion=iwyu",
@@ -205,29 +207,19 @@ return {
 					"--function-arg-placeholders",
 					"--fallback-style=llvm",
 					"--all-scopes-completion",
-					"--cross-file-rename",
 					"--log=verbose",
 					"--pretty",
 					"--pch-storage=memory",
-					"--query-driver=/usr/bin/clang-19,/usr/bin/clang++-19,/usr/bin/clang,/usr/bin/clang++,/usr/local/bin/clang,/usr/local/bin/clang++",
+					"--query-driver=/usr/bin/clang*,/usr/local/bin/clang*",
 				}
 
 				if compile_commands_dir then
 					table.insert(cmd, "--compile-commands-dir=" .. compile_commands_dir)
-				else
-					local fallback_includes = {
-						"/usr/include",
-						"/usr/local/include",
-						"/usr/include/c++/11",
-						"/usr/include/c++/12",
-						"/usr/include/c++/13",
-					}
-					for _, include_path in ipairs(fallback_includes) do
-						if vim.fn.isdirectory(include_path) == 1 then
-							table.insert(cmd, "--extra-arg=-I" .. include_path)
-						end
-					end
 				end
+				-- No compile_commands.json: clangd falls back to its own heuristics
+				-- plus the compilers found via --query-driver. (The old
+				-- "--extra-arg=-I<dir>" fallback was invalid — --extra-arg is a
+				-- clang-tidy flag, not a clangd one, and made clangd exit on start.)
 
 				return cmd
 			end
