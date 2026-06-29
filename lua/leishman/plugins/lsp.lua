@@ -117,7 +117,184 @@ return {
 			vim.keymap.set({ "n", "x" }, "<F3>", "<cmd>lua vim.lsp.buf.format({async=true})<cr>", opts)
 			vim.keymap.set("n", "<F4>", "<cmd>lua vim.lsp.buf.code_action()<cr>", opts)
 
-			vim.lsp.config("clangd", { cmd = { "--background-index", "--offset-encoding=utf-8", "--clang-tidy" } })
+			-- clangd: smart compile_commands.json discovery + rich flag set.
+			-- Ported from the old after/plugin/lsp.lua (pre lazy.nvim migration).
+			local function find_compile_commands_recursive(dir, max_depth)
+				max_depth = max_depth or 3
+				if max_depth <= 0 then
+					return nil
+				end
+
+				local candidates = {
+					dir .. "/compile_commands.json",
+					dir .. "/build/compile_commands.json",
+					dir .. "/build/debug/compile_commands.json",
+					dir .. "/build/release/compile_commands.json",
+					dir .. "/out/build/debug/compile_commands.json",
+					dir .. "/out/build/release/compile_commands.json",
+					dir .. "/build/clang19-debug/compile_commands.json",
+					dir .. "/build/clang19-release/compile_commands.json",
+					dir .. "/.build/compile_commands.json",
+					dir .. "/cmake-build-debug/compile_commands.json",
+					dir .. "/cmake-build-release/compile_commands.json",
+				}
+
+				for _, path in ipairs(candidates) do
+					if vim.fn.filereadable(path) == 1 then
+						return vim.fn.fnamemodify(path, ":h")
+					end
+				end
+
+				local parent = vim.fn.fnamemodify(dir, ":h")
+				if parent ~= dir then
+					return find_compile_commands_recursive(parent, max_depth - 1)
+				end
+
+				return nil
+			end
+
+			local clangd_root_markers = {
+				".git",
+				".hg",
+				".svn",
+				"CMakeLists.txt",
+				"Makefile",
+				"makefile",
+				".clangd",
+				".clang-format",
+				".clang-tidy",
+				"compile_commands.json",
+				"compile_flags.txt",
+				"configure.ac",
+				"configure.in",
+				"meson.build",
+				"BUILD.bazel",
+				"WORKSPACE",
+			}
+
+			local function get_project_root(bufnr)
+				local bufname = vim.api.nvim_buf_get_name(bufnr or 0)
+				local dirname = vim.fn.fnamemodify(bufname, ":p:h")
+
+				local function find_root(path)
+					for _, pattern in ipairs(clangd_root_markers) do
+						if vim.fn.glob(path .. "/" .. pattern) ~= "" then
+							return path
+						end
+					end
+					local parent = vim.fn.fnamemodify(path, ":h")
+					if parent == path then
+						return nil
+					end
+					return find_root(parent)
+				end
+
+				return find_root(dirname) or dirname
+			end
+
+			local function build_clangd_cmd(bufnr)
+				local project_root = get_project_root(bufnr)
+				local compile_commands_dir = find_compile_commands_recursive(project_root)
+
+				local cmd = {
+					"clangd",
+					"--background-index",
+					"--clang-tidy",
+					"--header-insertion=iwyu",
+					"--completion-style=detailed",
+					"--function-arg-placeholders",
+					"--fallback-style=llvm",
+					"--all-scopes-completion",
+					"--cross-file-rename",
+					"--log=verbose",
+					"--pretty",
+					"--pch-storage=memory",
+					"--query-driver=/usr/bin/clang-19,/usr/bin/clang++-19,/usr/bin/clang,/usr/bin/clang++,/usr/local/bin/clang,/usr/local/bin/clang++",
+				}
+
+				if compile_commands_dir then
+					table.insert(cmd, "--compile-commands-dir=" .. compile_commands_dir)
+				else
+					local fallback_includes = {
+						"/usr/include",
+						"/usr/local/include",
+						"/usr/include/c++/11",
+						"/usr/include/c++/12",
+						"/usr/include/c++/13",
+					}
+					for _, include_path in ipairs(fallback_includes) do
+						if vim.fn.isdirectory(include_path) == 1 then
+							table.insert(cmd, "--extra-arg=-I" .. include_path)
+						end
+					end
+				end
+
+				return cmd
+			end
+
+			local function set_clangd_config(bufnr)
+				vim.lsp.config("clangd", {
+					cmd = build_clangd_cmd(bufnr),
+					root_markers = clangd_root_markers,
+					init_options = {
+						usePlaceholders = true,
+						completeUnimported = true,
+						clangdFileStatus = true,
+					},
+				})
+			end
+
+			-- Initial config (buffer 0); refreshed per-project below.
+			set_clangd_config(0)
+
+			-- Recompute the clangd cmd for the current buffer's project BEFORE the
+			-- filetype autocmd (BufRead/BufNewFile) fires `LspStart clangd`. This
+			-- replaces the old lspconfig `on_new_config` hook.
+			vim.api.nvim_create_autocmd({ "BufReadPre", "BufNewFile" }, {
+				pattern = { "*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hpp", "*.hxx" },
+				callback = function(ev)
+					set_clangd_config(ev.buf)
+				end,
+			})
+
+			-- clangd buffer-local keymaps + helper commands.
+			vim.api.nvim_create_autocmd("LspAttach", {
+				callback = function(ev)
+					local client = vim.lsp.get_client_by_id(ev.data.client_id)
+					if not client or client.name ~= "clangd" then
+						return
+					end
+					local bufnr = ev.buf
+					local bufopts = { buffer = bufnr, silent = true }
+
+					vim.keymap.set("n", "<space>ch", "<cmd>ClangdSwitchSourceHeader<cr>", bufopts)
+					vim.keymap.set("n", "<space>ct", "<cmd>ClangdTypeHierarchy<cr>", bufopts)
+					vim.keymap.set("n", "<space>cs", "<cmd>ClangdSymbolInfo<cr>", bufopts)
+
+					vim.api.nvim_buf_create_user_command(bufnr, "ClangdRestart", function()
+						vim.lsp.stop_client(client.id)
+						vim.cmd("LspStart clangd")
+					end, {})
+
+					vim.api.nvim_buf_create_user_command(bufnr, "ClangdFindCompileCommands", function()
+						local project_root = get_project_root(bufnr)
+						local dir = find_compile_commands_recursive(project_root)
+						if dir then
+							print("Found compile_commands.json in: " .. dir)
+							local file = dir .. "/compile_commands.json"
+							local out = vim.fn.system(
+								"jq length " .. vim.fn.shellescape(file) .. " 2>/dev/null || echo 'Cannot read file'"
+							)
+							print("Number of compilation units: " .. vim.trim(out))
+						else
+							print("No compile_commands.json found in project")
+							print(
+								"Try: cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON && ln -sf build/compile_commands.json ."
+							)
+						end
+					end, {})
+				end,
+			})
 			vim.lsp.config("clang-format", {})
 			vim.lsp.config("rust_analyzer", {})
 			vim.lsp.config("pyright", {
