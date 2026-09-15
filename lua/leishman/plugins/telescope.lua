@@ -11,6 +11,13 @@ return {
 				desc = "Find files",
 			},
 			{
+				"<leader>pv",
+				function()
+					require("telescope.builtin").find_files({ cwd = vim.fn.expand("%:p:h"), hidden = true })
+				end,
+				desc = "Find files in current file's dir",
+			},
+			{
 				"<leader>fp",
 				function()
 					require("telescope.builtin").live_grep()

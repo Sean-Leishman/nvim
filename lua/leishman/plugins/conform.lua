@@ -7,6 +7,11 @@ return {
 					lua = { "stylua" },
 					-- Conform will run multiple formatters sequentially
 					python = { "ruff_fix", "ruff_format", "black" },
+					-- clangd has clang-format built in; "prefer" makes conform use it
+					-- instead of the `*` trimmers below (which otherwise satisfy the
+					-- `fallback` check and stop clangd from ever formatting).
+					c = { lsp_format = "prefer" },
+					cpp = { lsp_format = "prefer" },
 					["*"] = { "trim_whitespace", "trim_newlines" },
 					-- You can customize some of the format options for the filetype (:help conform.format)
 					rust = { "rustfmt", lsp_format = "fallback" },

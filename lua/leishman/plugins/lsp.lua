@@ -20,7 +20,7 @@ return {
 				})
 			end
 			require("mason-lspconfig").setup({
-				ensure_installed = { "clangd", "pyright", "rust_analyzer" },
+				ensure_installed = { "clangd", "lua_ls", "pyright", "rust_analyzer" },
 				automatic_installation = true,
 				handlers = {
 					default_setup,
@@ -50,6 +50,7 @@ return {
 			"rafamadriz/friendly-snippets",
 			"onsails/lspkind.nvim",
 			"L3MON4D3/LuaSnip",
+			"hrsh7th/cmp-nvim-lsp-signature-help",
 		},
 		config = function()
 			local cmp = require("cmp")
@@ -75,12 +76,38 @@ return {
 					["<C-Space>"] = cmp.mapping.complete(),
 					["<C-e>"] = cmp.mapping.abort(),
 					["<Enter>"] = cmp.mapping.confirm({ select = true }),
+						-- Jump between snippet placeholders (clangd's `vector<typename>`
+						-- or a function's arg1 -> arg2), and select-next when the menu is
+						-- open. `s` mode is required: a selected placeholder is select mode.
+						["<Tab>"] = cmp.mapping(function(fallback)
+							if cmp.visible() then
+								cmp.select_next_item()
+							elseif luasnip.locally_jumpable(1) then
+								luasnip.jump(1)
+							else
+								fallback()
+							end
+						end, { "i", "s" }),
+						["<S-Tab>"] = cmp.mapping(function(fallback)
+							if cmp.visible() then
+								cmp.select_prev_item()
+							elseif luasnip.locally_jumpable(-1) then
+								luasnip.jump(-1)
+							else
+								fallback()
+							end
+						end, { "i", "s" }),
 				}),
 
+				-- Two groups: LSP + snippets win; buffer/path only fill in when the
+				-- first group is empty. Keeps clangd results from being diluted by
+				-- plain buffer-word matches.
 				sources = cmp.config.sources({
 					{ name = "nvim_lsp" },
+					{ name = "nvim_lsp_signature_help" },
 					{ name = "luasnip" },
-					{ name = "buffer" },
+				}, {
+					{ name = "buffer", keyword_length = 3 },
 					{ name = "path" },
 				}),
 				formatting = {
@@ -89,6 +116,7 @@ return {
 						ellipsis_char = "...",
 					}),
 				},
+				experimental = { ghost_text = true },
 			})
 		end,
 	},
